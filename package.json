@@ -1,12 +1,30 @@
 {
   "name": "wikihour-base",
   "version": "1.0.0",
+  "description": "This is a Cloudflare Worker that runs WikiHour, a mini dashboard for recent wikipedia edits and a word-cloud style visualization of the most common words in the edits. Created with Google AI Mode and using profanity filters.",
+  "homepage": "https://github.com/jamesdenny/wikihour-base#readme",
+  "bugs": {
+    "url": "https://github.com/jamesdenny/wikihour-base/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamesdenny/wikihour-base.git"
+  },
+  "license": "ISC",
+  "author": "",
   "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "build": "copy \"node_modules\\chart.js\\dist\\chart.umd.min.js\" \"public\\chart.min.js\"",
+    "dev": "npm run build && wrangler dev --remote=false",
+    "deploy": "wrangler deploy"
+  },
   "dependencies": {
-    "stopword": "^1.1.0",
-    "leo-profanity": "^1.7.0"
+    "chart.js": "^4.5.1",
+    "leo-profanity": "^1.9.0",
+    "stopword": "^3.1.5"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.77.0"
   }
 }

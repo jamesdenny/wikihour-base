@@ -1,7 +1,11 @@
-name = "wiki-live-dashboard"
+name = "wikihour-base"
 main = "src/index.js"
-compatibility_date = "2024-03-24"
-compatibility_flags = ["nodejs_compat", "durable_object_alarms"]
+compatibility_date = "2024-04-03" # Required for RPC
+compatibility_flags = ["nodejs_compat"]
+
+# New way to serve the public folder
+[assets]
+directory = "./public"
 
 [durable_objects]
 bindings = [{name = "WIKI_STATS", class_name = "WikiStats"}]
@@ -10,5 +14,5 @@ bindings = [{name = "WIKI_STATS", class_name = "WikiStats"}]
 tag = "v1"
 new_classes = ["WikiStats"]
 
-[site]
-bucket = "./public"
+[dev]
+local_protocol = "https"

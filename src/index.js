@@ -1,38 +1,52 @@
+import { DurableObject } from "cloudflare:workers";
 import { removeStopwords, eng } from 'stopword';
 import filter from 'leo-profanity';
 
+// --- 1. The Gateway Worker ---
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
     const id = env.WIKI_STATS.idFromName('global-stats');
-    const obj = env.WIKI_STATS.get(id);
-    return obj.fetch(request);
+    const stub = env.WIKI_STATS.get(id);
+
+    // RPC CALLS: No more manual fetch() inside the worker!
+    if (url.pathname === '/api/history') {
+      const history = await stub.getHistory();
+      return Response.json(history);
+    }
+
+    if (url.pathname === '/api/restart') {
+      await stub.startStream();
+      return new Response("Restarting");
+    }
+
+    // SSE Stream still uses fetch because it's a persistent HTTP connection
+    return stub.fetch(request);
   }
 };
 
-export class WikiStats {
-  constructor(state, env) {
-    this.state = state;
+// --- 2. The Durable Object (Modern SDK) ---
+export class WikiStats extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
     this.env = env;
-    this.history = []; // Rolling 1-hour history (360 chunks)
-    this.buffer = this.resetBuffer();
+    this.history = []; 
     this.clients = new Set();
-    
-    // Resilience State
-    this.lastEventDt = null; 
-    this.lastHeartbeat = Date.now();
-    this.esInstance = null;
-
+    this.buffer = this.resetBuffer();
     filter.loadDictionary('en');
-    
-    // Start the engine
+
     this.initialize();
   }
 
   async initialize() {
-    // Recover last known event time from persistent storage
-    this.lastEventDt = await this.state.storage.get("lastEventDt");
+    this.lastEventDt = await this.ctx.storage.get("lastEventDt");
     this.startStream();
-    this.state.storage.setAlarm(Date.now() + 10000);
+    this.ctx.storage.setAlarm(Date.now() + 10000);
+  }
+
+  // RPC METHOD: Exposed directly to the Worker
+  async getHistory() {
+    return this.history;
   }
 
   resetBuffer() {
@@ -40,173 +54,140 @@ export class WikiStats {
   }
 
   async startStream() {
-    if (this.esInstance) this.esInstance.close();
-
-    // The "Time Machine": Backfill holes using 'since'
+    if (this.esInstance && this.esInstance.body) {
+      try {
+        this.esInstance.body.cancel();
+      } catch (e) {
+        // Ignore cancellation errors
+      }
+    }
+    this.esInstance = null;
     const since = this.lastEventDt || new Date(Date.now() - 3600000).toISOString();
-    console.log(`📡 Connecting to Wikipedia since: ${since}`);
-
+    
     try {
-      this.esInstance = new EventSource(`https://stream.wikimedia.org{since}`);
+      const uaString = `${this.env.CF_WORKER_NAME || this.env.PROJECT_NAME || 'wikihour-base'}/1.0; ${this.env.CF_WORKER_SCRIPT_NAME || 'https://github.com/jamesplease/wikihour-base'}; ${this.env.CF_WORKER_ENV || 'Development'}`;
+      
+      // Use fetch instead of EventSource to set custom headers
+      this.esInstance = await fetch(`https://stream.wikimedia.org/v2/stream/recentchange`, {
+        headers: {
+          'User-Agent': uaString,
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache'
+        }
+      });
+      
+      if (!this.esInstance.ok) {
+        throw new Error(`HTTP ${this.esInstance.status}: ${this.esInstance.statusText}`);
+      }
+      
+      const reader = this.esInstance.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      this.processStream(reader, decoder, buffer);
+    } catch (e) { 
+      console.error('Stream connection error:', e);
+      this.lastHeartbeat = 0; 
+    }
+  }
 
-      this.esInstance.onmessage = (event) => {
-        try {
-          const d = JSON.parse(event.data);
-          
-          // Update Heartbeat & High Water Mark
-          if (d.meta && d.meta.dt) {
-            this.lastEventDt = d.meta.dt;
-            this.lastHeartbeat = Date.now();
+  async processStream(reader, decoder, buffer) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const eventData = line.slice(6);
+              if (eventData.trim()) {
+                const d = JSON.parse(eventData);
+                if (d.meta?.dt) {
+                  this.lastEventDt = d.meta.dt;
+                  this.lastHeartbeat = Date.now();
+                }
+                if (d.meta?.domain !== 'canary' && d.server_name === 'en.wikipedia.org') {
+                  this.parseEvent(d);
+                }
+              }
+            } catch (e) {
+              console.warn('Error parsing event:', e);
+            }
           }
-
-          // Pre-filter for English Wikipedia
-          if (d.wiki === 'enwiki' && d.meta.domain !== 'canary') {
-            this.parseEvent(d);
-          }
-        } catch (e) {}
-      };
-
-      this.esInstance.onerror = () => {
-        this.lastHeartbeat = 0; // Trigger watchdog on next alarm
-      };
+        }
+      }
     } catch (e) {
+      console.error('Stream processing error:', e);
       this.lastHeartbeat = 0;
     }
   }
 
   parseEvent(d) {
-    // Categorize
     if (d.bot) this.buffer.bot++;
     else if (d.minor) this.buffer.minor++;
     else this.buffer.major++;
-
-    // Delta Bytes
     if (d.length) this.buffer.delta += (d.length.new - d.length.old);
-
-    // Raw Word Tally
     const words = d.title.toLowerCase().split(/\W+/).filter(w => w.length > 2);
-    for (const w of words) {
-      this.buffer.words.set(w, (this.buffer.words.get(w) || 0) + 1);
-    }
+    for (const w of words) this.buffer.words.set(w, (this.buffer.words.get(w) || 0) + 1);
   }
 
   async alarm() {
-    const stallTime = Date.now() - this.lastHeartbeat;
-
-    // Watchdog: If silent > 60s, Reconnect and fill the gap
-    if (stallTime > 60000) {
-      console.warn(`⚠️ Stream stalled for ${Math.round(stallTime/1000)}s. Filling holes...`);
-      await this.startStream();
-    }
-
-    // Persist High Water Mark to survive DO reboots
-    if (this.lastEventDt) {
-      await this.state.storage.put("lastEventDt", this.lastEventDt);
-    }
-
+    if (Date.now() - this.lastHeartbeat > 60000) await this.startStream();
+    if (this.lastEventDt) await this.ctx.storage.put("lastEventDt", this.lastEventDt);
+    
     await this.flush();
-    this.state.storage.setAlarm(Date.now() + 10000);
+    this.ctx.storage.setAlarm(Date.now() + 10000);
   }
 
   async flush() {
-    const rawMap = this.buffer.words;
-    const stats = { localCensored: 0, totalProcessed: 0 };
-    const wikiNoise = ['wikipedia', 'user', 'talk', 'page', 'edit', 'article', 'category', 'template'];
-
-    // Stage 1 & 2: Stopwords + Local Leo-Profanity
-    const rawKeys = Array.from(rawMap.keys());
-    const filteredKeys = removeStopwords(rawKeys, [...eng, ...wikiNoise]);
+    const rawKeys = Array.from(this.buffer.words.keys());
+    const wikiNoise = ['wikipedia', 'user', 'talk', 'page', 'edit', 'article'];
+    const filtered = removeStopwords(rawKeys, [...eng, ...wikiNoise]);
     
-    let aiInputMap = new Map();
-    for (const word of filteredKeys) {
-      stats.totalProcessed++;
-      const count = rawMap.get(word);
-      if (filter.check(word)) {
-        stats.localCensored++;
-        aiInputMap.set('****', (aiInputMap.get('****') || 0) + count);
+    let localCensored = 0;
+    let finalMap = new Map();
+
+    for (const w of filtered) {
+      const count = this.buffer.words.get(w);
+      if (filter.check(w)) {
+        localCensored++;
+        finalMap.set('****', (finalMap.get('****') || 0) + count);
       } else {
-        aiInputMap.set(word, count);
+        finalMap.set(w, count);
       }
     }
 
-    // Stage 3: AI Refinement (PG-Rating via Cloudflare AI Gateway)
-    const finalWords = await this.aiRefine(aiInputMap);
-
     const chunk = {
       time: new Date().toISOString(),
-      edits: { major: this.buffer.major, minor: this.buffer.minor, bot: this.buffer.bot },
+      edits: { ...this.buffer },
       delta: this.buffer.delta,
-      words: finalWords,
-      censorship: {
-        safetyScore: stats.totalProcessed > 0 ? 100 - ((stats.localCensored / stats.totalProcessed) * 100) : 100,
-        eventDt: this.lastEventDt // Used by client to detect lag/backfill
-      }
+      words: Array.from(finalMap.entries()).map(([word, count]) => ({word, count})).sort((a,b) => b.count - a.count).slice(0,20),
+      censorship: { safetyScore: filtered.length > 0 ? 100 - ((localCensored / filtered.length) * 100) : 100 }
     };
 
     this.history.push(chunk);
     if (this.history.length > 360) this.history.shift();
     
-    this.broadcast(chunk);
-    this.buffer = this.resetBuffer();
-  }
-
-  async aiRefine(inputMap) {
-    const wordsForAI = Array.from(inputMap.keys()).filter(w => w !== '****' && w.length > 2);
-    if (wordsForAI.length === 0) return Array.from(inputMap.entries()).map(([word, count]) => ({word, count}));
-
-    try {
-      // Point this to your Cloudflare AI Gateway URL
-      const gatewayUrl = `https://gateway.ai.cloudflare.com{this.env.CF_ACCOUNT_ID}/wiki-moderator/openai/chat/completions`;
-      
-      const res = await fetch(gatewayUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${this.env.OPENAI_API_KEY}`,
-          "cf-aig-cache-ttl": "86400"
-        },
-        body: JSON.stringify({
-          model: "gpt-3.5-turbo",
-          messages: [{ role: "system", content: "Replace any suggestive or non-PG words with ****. Return only the comma-separated list." }, { role: "user", content: wordsForAI.join(', ') }],
-          temperature: 0
-        })
-      });
-
-      const result = await res.json();
-      const cleaned = result.choices[0].message.content.split(',').map(w => w.trim());
-      
-      const finalMap = new Map();
-      wordsForAI.forEach((orig, i) => {
-        const word = cleaned[i] || '****';
-        finalMap.set(word, (finalMap.get(word) || 0) + inputMap.get(orig));
-      });
-
-      if (inputMap.has('****')) finalMap.set('****', (finalMap.get('****') || 0) + inputMap.get('****'));
-      
-      return Array.from(finalMap.entries()).map(([word, count]) => ({word, count})).sort((a,b) => b.count - a.count).slice(0, 20);
-    } catch (e) {
-      return Array.from(inputMap.entries()).map(([word, count]) => ({word, count}));
-    }
-  }
-
-  broadcast(chunk) {
     const msg = `data: ${JSON.stringify(chunk)}\n\n`;
     for (const c of this.clients) {
       try { c.enqueue(new TextEncoder().encode(msg)); } catch (e) { this.clients.delete(c); }
     }
+    this.buffer = this.resetBuffer();
   }
 
+  // fetch() is now ONLY used for the SSE stream connection
   async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname === '/api/history') return Response.json(this.history);
-    if (url.pathname === '/api/restart') { this.startStream(); return new Response("Restarting"); }
-    
     const stream = new ReadableStream({
       start: (controller) => {
         this.clients.add(controller);
         request.signal.addEventListener('abort', () => this.clients.delete(controller));
       }
     });
-    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
   }
 }

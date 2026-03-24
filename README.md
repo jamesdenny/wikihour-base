@@ -4,6 +4,8 @@ This is a Cloudflare Worker that runs WikiHour, a mini dashboard for recent wiki
 
 Includes OpenAI for the AI-powered PG-rating filter (and leo-profanity for base filtering).
 
+Note: Updated for latest Cloudflare Worker changes (using [assets] and Wrangler v4).
+
 ### Local Project Initialisation
 Either clone this repo, or run the following bash commands in your terminal:
 ```
@@ -22,7 +24,7 @@ mkdir src public
 
 ## Installation
 
-1. Install [Wrangler](https://github.com/cloudflare/wrangler)
+1. Install [Wrangler](https://developers.cloudflare.com/pages/functions/local-development/#install-wrangler)
 2. Authenticate Wrangler with your Cloudflare account
 3. `npm install` to install dependencies
 

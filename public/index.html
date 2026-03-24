@@ -2,9 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Wikipedia Live: Global Pulse</title>
-    <script src="https://cdn.jsdelivr.net"></script>
-    <style>
+    <title>WikiHour Base</title>
+        <style>
         :root { --bg: #0f172a; --panel: #1e293b; --text: #f8fafc; --accent: #3b82f6; }
         body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
         
@@ -46,6 +45,7 @@
         <span id="timeLabel">CONNECTING...</span>
     </div>
 
+    <script src="chart.min.js"></script>
     <script>
         let timeline = [];
         let isLive = true;
@@ -133,22 +133,22 @@
 
             // 2. Update Gauges
             const score = data.censorship.safetyScore;
-            safetyGauge.data.datasets.data = [100 - score, score];
+            safetyGauge.data.datasets[0].data = [100 - score, score];
             safetyGauge.update();
             document.getElementById('safetyVal').innerText = `SAFETY: ${score.toFixed(1)}%`;
             document.getElementById('safetyVal').style.color = score < 95 ? '#ef4444' : '#22c55e';
 
             // 3. Update Sparkline
-            trendChart.data.datasets.data = timeline.map(c => c.censorship.safetyScore);
+            trendChart.data.datasets[0].data = timeline.map(c => c.censorship.safetyScore);
             trendChart.update();
 
             // 4. Update Activity Chart (Last 60 chunks)
             const slice = timeline.slice(Math.max(0, index - 59), index + 1);
             mainChart.data.labels = slice.map(c => new Date(c.time).toLocaleTimeString([], { hour12: false }));
-            mainChart.data.datasets.data = slice.map(c => c.edits.major);
-            mainChart.data.datasets.data = slice.map(c => c.edits.minor);
-            mainChart.data.datasets.data = slice.map(c => c.edits.bot);
-            mainChart.data.datasets.data = slice.map(c => c.delta);
+            mainChart.data.datasets[0].data = slice.map(c => c.edits.major);
+            mainChart.data.datasets[1].data = slice.map(c => c.edits.minor);
+            mainChart.data.datasets[2].data = slice.map(c => c.edits.bot);
+            mainChart.data.datasets[3].data = slice.map(c => c.delta);
             mainChart.update();
 
             // 5. Update Word Cloud
