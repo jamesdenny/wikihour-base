@@ -1,0 +1,7 @@
+node_modules
+.wrangler
+.dev.vars
+dist
+
+#Ignore windsurf AI rules
+.windsurfrules

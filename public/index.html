@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Wikipedia Live: Global Pulse</title>
+    <script src="https://cdn.jsdelivr.net"></script>
+    <style>
+        :root { --bg: #0f172a; --panel: #1e293b; --text: #f8fafc; --accent: #3b82f6; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
+        
+        /* Top Section */
+        #top { height: 45vh; padding: 20px; display: flex; gap: 20px; border-bottom: 1px solid #334155; }
+        #chartArea { flex: 3; position: relative; }
+        #gaugeArea { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--panel); border-radius: 16px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        
+        /* Bottom Section (Word Cloud) */
+        #wordCloud { flex: 1; position: relative; overflow: hidden; display: flex; flex-wrap: wrap; justify-content: center; align-content: center; padding: 40px; background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%); }
+        .word-node { position: absolute; transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1); font-weight: 900; text-transform: uppercase; white-space: nowrap; text-shadow: 0 0 20px rgba(0,0,0,0.5); }
+
+        /* Controls */
+        .controls { padding: 15px 30px; background: var(--panel); display: flex; gap: 20px; align-items: center; border-top: 1px solid #334155; }
+        #statusDot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; transition: background 0.3s; }
+        input[type=range] { flex-grow: 1; cursor: pointer; accent-color: var(--accent); }
+        button { padding: 10px 20px; cursor: pointer; border-radius: 8px; border: none; background: var(--accent); color: white; font-weight: bold; transition: opacity 0.2s; }
+        button:hover { opacity: 0.9; }
+        #timeLabel { min-width: 150px; font-variant-numeric: tabular-nums; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="top">
+        <div id="chartArea"><canvas id="activityChart"></canvas></div>
+        <div id="gaugeArea">
+            <canvas id="safetyGauge"></canvas>
+            <p id="safetyVal">SAFETY: 100%</p>
+            <div style="height: 60px; width: 100%"><canvas id="safetyTrend"></canvas></div>
+        </div>
+    </div>
+
+    <div id="wordCloud"></div>
+
+    <div class="controls">
+        <button id="playBtn">▶ PLAY</button>
+        <button id="refreshBtn" style="background: #475569;" title="Restart Stream">🔄</button>
+        <div id="statusDot"></div>
+        <input type="range" id="timeSlider" min="0" max="0" value="0">
+        <span id="timeLabel">CONNECTING...</span>
+    </div>
+
+    <script>
+        let timeline = [];
+        let isLive = true;
+        let playInterval = null;
+
+        // --- CHART: Activity (Stacked Bar + Line) ---
+        const mainChart = new Chart(document.getElementById('activityChart'), {
+            type: 'bar',
+            data: { labels: [], datasets: [
+                { label: 'Major', data: [], backgroundColor: '#22c55e', stack: 'edits' },
+                { label: 'Minor', data: [], backgroundColor: '#3b82f6', stack: 'edits' },
+                { label: 'Bot', data: [], backgroundColor: '#ef4444', stack: 'edits' },
+                { label: 'Bytes', data: [], type: 'line', borderColor: '#eab308', yAxisID: 'y1', tension: 0.3, pointRadius: 0 }
+            ]},
+            options: { 
+                responsive: true, maintainAspectRatio: false,
+                scales: { 
+                    y: { stacked: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                    y1: { position: 'right', grid: { display: false }, ticks: { color: '#eab308' } }
+                },
+                plugins: { legend: { labels: { color: '#f8fafc', font: { weight: 'bold' } } } },
+                animation: false
+            }
+        });
+
+        // --- CHART: Safety Gauge ---
+        const safetyGauge = new Chart(document.getElementById('safetyGauge'), {
+            type: 'doughnut',
+            data: { datasets: [{ data:, backgroundColor: ['#ef4444', '#22c55e'], borderWidth: 0 }]},
+            options: { circumference: 180, rotation: 270, cutout: '80%', plugins: { legend: false, tooltip: false } }
+        });
+
+        // --- CHART: Safety Sparkline ---
+        const trendChart = new Chart(document.getElementById('safetyTrend'), {
+            type: 'line',
+            data: { labels: new Array(360).fill(''), datasets: [{ data: [], borderColor: '#22c55e', borderWidth: 2, pointRadius: 0, fill: true, backgroundColor: 'rgba(34, 197, 94, 0.1)' }]},
+            options: { scales: { x: { display: false }, y: { display: false, min: 0, max: 100 } }, plugins: { legend: false }, maintainAspectRatio: false }
+        });
+
+        // --- CORE LOGIC ---
+        async function init() {
+            try {
+                const res = await fetch('/api/history');
+                timeline = await res.json();
+                updateSliderRange();
+                if (timeline.length > 0) render(timeline.length - 1);
+
+                const sse = new EventSource('/api/live');
+                sse.onmessage = (e) => {
+                    const chunk = JSON.parse(e.data);
+                    timeline.push(chunk);
+                    if (timeline.length > 360) timeline.shift();
+                    updateSliderRange();
+                    if (isLive) render(timeline.length - 1);
+                };
+            } catch (e) { console.error("Connection Failed", e); }
+        }
+
+        function updateSliderRange() {
+            const slider = document.getElementById('timeSlider');
+            slider.max = Math.max(0, timeline.length - 1);
+            if (isLive) slider.value = slider.max;
+        }
+
+        function render(index) {
+            const data = timeline[index];
+            if (!data) return;
+
+            // 1. Status Heartbeat & Hole-filling detection
+            const dot = document.getElementById('statusDot');
+            const label = document.getElementById('timeLabel');
+            const eventTime = new Date(data.time).getTime();
+            const lag = (Date.now() - eventTime) / 1000;
+
+            if (lag > 40) {
+                dot.style.background = "#3b82f6"; // Blue (Backfilling)
+                label.innerText = `BACKFILLING...`;
+            } else if (lag < 20) {
+                dot.style.background = "#22c55e"; // Green
+                label.innerText = isLive ? "LIVE" : new Date(data.time).toLocaleTimeString();
+            } else {
+                dot.style.background = "#eab308"; // Yellow (Stalled)
+                label.innerText = "STALLED";
+            }
+
+            // 2. Update Gauges
+            const score = data.censorship.safetyScore;
+            safetyGauge.data.datasets.data = [100 - score, score];
+            safetyGauge.update();
+            document.getElementById('safetyVal').innerText = `SAFETY: ${score.toFixed(1)}%`;
+            document.getElementById('safetyVal').style.color = score < 95 ? '#ef4444' : '#22c55e';
+
+            // 3. Update Sparkline
+            trendChart.data.datasets.data = timeline.map(c => c.censorship.safetyScore);
+            trendChart.update();
+
+            // 4. Update Activity Chart (Last 60 chunks)
+            const slice = timeline.slice(Math.max(0, index - 59), index + 1);
+            mainChart.data.labels = slice.map(c => new Date(c.time).toLocaleTimeString([], { hour12: false }));
+            mainChart.data.datasets.data = slice.map(c => c.edits.major);
+            mainChart.data.datasets.data = slice.map(c => c.edits.minor);
+            mainChart.data.datasets.data = slice.map(c => c.edits.bot);
+            mainChart.data.datasets.data = slice.map(c => c.delta);
+            mainChart.update();
+
+            // 5. Update Word Cloud
+            renderCloud(data.words);
+        }
+
+        function renderCloud(words) {
+            const cloud = document.getElementById('wordCloud');
+            const currentNodes = Array.from(cloud.querySelectorAll('.word-node'));
+            const activeWords = new Set(words.map(w => w.word));
+            const maxCount = Math.max(...words.map(w => w.count)) || 1;
+
+            // Fade out words no longer present
+            currentNodes.forEach(node => {
+                if (!activeWords.has(node.dataset.word)) node.style.opacity = 0;
+            });
+
+            words.forEach((w, i) => {
+                let el = document.querySelector(`[data-word="${CSS.escape(w.word)}"]`);
+                if (!el) {
+                    el = document.createElement('div');
+                    el.className = 'word-node';
+                    el.dataset.word = w.word;
+                    el.innerText = w.word.toUpperCase();
+                    el.style.opacity = 0;
+                    cloud.appendChild(el);
+                }
+
+                const weight = w.count / maxCount;
+                const size = 1 + (weight * 3.5); // 1rem to 4.5rem
+                
+                // Position based on rank to ensure smooth movement
+                const row = Math.floor(i / 5);
+                const col = i % 5;
+                el.style.transform = `translate(${(col * 18) - 40}vw, ${(row * 15) - 30}vh)`;
+                el.style.fontSize = `${size}rem`;
+                el.style.opacity = 0.4 + (weight * 0.6);
+                el.style.color = w.word === '****' ? '#ef4444' : `hsl(${210 + (weight * 60)}, 80%, 70%)`;
+            });
+        }
+
+        // --- INTERACTION ---
+        document.getElementById('timeSlider').oninput = (e) => {
+            isLive = false;
+            clearInterval(playInterval);
+            document.getElementById('playBtn').innerText = "▶ PLAY";
+            render(parseInt(e.target.value));
+        };
+
+        document.getElementById('playBtn').onclick = () => {
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+                document.getElementById('playBtn').innerText = "▶ PLAY";
+            } else {
+                isLive = false;
+                document.getElementById('playBtn').innerText = "⏸ PAUSE";
+                playInterval = setInterval(() => {
+                    let val = parseInt(document.getElementById('timeSlider').value);
+                    if (val >= timeline.length - 1) {
+                        clearInterval(playInterval);
+                        playInterval = null;
+                        document.getElementById('playBtn').innerText = "▶ PLAY";
+                        isLive = true;
+                    } else {
+                        val++;
+                        document.getElementById('timeSlider').value = val;
+                        render(val);
+                    }
+                }, 600);
+            }
+        };
+
+        document.getElementById('refreshBtn').onclick = () => fetch('/api/restart');
+
+        init();
+    </script>
+</body>
+</html>

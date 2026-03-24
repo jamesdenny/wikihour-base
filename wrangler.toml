@@ -1,0 +1,14 @@
+name = "wiki-live-dashboard"
+main = "src/index.js"
+compatibility_date = "2024-03-24"
+compatibility_flags = ["nodejs_compat", "durable_object_alarms"]
+
+[durable_objects]
+bindings = [{name = "WIKI_STATS", class_name = "WikiStats"}]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["WikiStats"]
+
+[site]
+bucket = "./public"

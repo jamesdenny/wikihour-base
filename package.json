@@ -1,0 +1,12 @@
+{
+  "name": "wikihour-base",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "stopword": "^1.1.0",
+    "leo-profanity": "^1.7.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
