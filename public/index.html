@@ -74,7 +74,7 @@
         // --- CHART: Safety Gauge ---
         const safetyGauge = new Chart(document.getElementById('safetyGauge'), {
             type: 'doughnut',
-            data: { datasets: [{ data:, backgroundColor: ['#ef4444', '#22c55e'], borderWidth: 0 }]},
+            data: { datasets: [{ data: [], backgroundColor: ['#ef4444', '#22c55e'], borderWidth: 0 }]},
             options: { circumference: 180, rotation: 270, cutout: '80%', plugins: { legend: false, tooltip: false } }
         });
 
