@@ -50,7 +50,7 @@ export class WikiStats extends DurableObject {
   }
 
   resetBuffer() {
-    return { major: 0, minor: 0, bot: 0, delta: 0, words: new Map() };
+    return { major: 0, minor: 0, delta: 0, words: new Map() };
   }
 
   async startStream() {
@@ -111,9 +111,11 @@ export class WikiStats extends DurableObject {
                   this.lastEventDt = d.meta.dt;
                   this.lastHeartbeat = Date.now();
                 }
-                if (d.meta?.domain !== 'canary' && d.server_name === 'en.wikipedia.org') {
-                  this.parseEvent(d);
-                }
+                if (d.bot === true) continue; 
+                if (d.meta?.domain === 'canary') continue; 
+                if (d.server_name !== 'en.wikipedia.org') continue;
+
+                this.parseEvent(d);
               }
             } catch (e) {
               console.warn('Error parsing event:', e);
@@ -128,8 +130,7 @@ export class WikiStats extends DurableObject {
   }
 
   parseEvent(d) {
-    if (d.bot) this.buffer.bot++;
-    else if (d.minor) this.buffer.minor++;
+    if (d.minor) this.buffer.minor++;
     else this.buffer.major++;
     if (d.length) this.buffer.delta += (d.length.new - d.length.old);
     const words = d.title.toLowerCase().split(/\W+/).filter(w => w.length > 2);

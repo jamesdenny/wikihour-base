@@ -66,7 +66,6 @@ Push it to the world:
 ```
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put CF_ACCOUNT_ID
-Use code with caution.
 ```
 
 2. Deploy:

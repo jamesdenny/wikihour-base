@@ -23,6 +23,77 @@
         button { padding: 10px 20px; cursor: pointer; border-radius: 8px; border: none; background: var(--accent); color: white; font-weight: bold; transition: opacity 0.2s; }
         button:hover { opacity: 0.9; }
         #timeLabel { min-width: 150px; font-variant-numeric: tabular-nums; font-weight: bold; }
+        #timeLabel.selected {
+            color: #eab308; /* Highlight label when viewing history */
+            text-shadow: 0 0 10px rgba(234, 179, 8, 0.4);
+        }
+        .word-node {
+            cursor: pointer;
+            z-index: 10;
+        }
+
+        .word-node:hover {
+            opacity: 1 !important;
+            text-shadow: 0 0 15px var(--accent);
+            z-index: 100;
+        }
+
+        /* Ensure **** isn't clickable */
+        .word-node[data-word="****"] {
+            cursor: default;
+            pointer-events: none;
+        }
+
+        #tableSection {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    background: #0f172a;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    color: #cbd5e1;
+}
+
+th {
+    text-align: left;
+    padding: 12px;
+    border-bottom: 2px solid #1e293b;
+    color: #94a3b8;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+}
+
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #1e293b;
+}
+
+tr:hover {
+    background: #1e293b;
+}
+
+.rank-cell { width: 50px; font-weight: bold; color: #64748b; }
+.word-cell { font-weight: bold; color: #f8fafc; }
+.count-cell { color: #3b82f6; }
+.share-bar { height: 4px; background: #3b82f6; border-radius: 2px; margin-top: 4px; }
+
+.wiki-link,
+.ignore-btn {
+    color: #eab308;
+    text-decoration: none;
+    font-size: 0.8rem;
+    border: 1px solid #eab308;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.wiki-link:hover, .ignore-btn:hover {
+    background: #eab308;
+    color: #0f172a;
+}
     </style>
 </head>
 <body>
@@ -35,7 +106,22 @@
         </div>
     </div>
 
-    <div id="wordCloud"></div>
+    <div id="tableSection">
+    <table id="wordTable">
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>Topic</th>
+                <th>Usage</th>
+                <th>Share</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody id="tableBody">
+            <!-- Rows injected here -->
+        </tbody>
+    </table>
+</div>
 
     <div class="controls">
         <button id="playBtn">▶ PLAY</button>
@@ -57,14 +143,40 @@
             data: { labels: [], datasets: [
                 { label: 'Major', data: [], backgroundColor: '#22c55e', stack: 'edits' },
                 { label: 'Minor', data: [], backgroundColor: '#3b82f6', stack: 'edits' },
-                { label: 'Bot', data: [], backgroundColor: '#ef4444', stack: 'edits' },
-                { label: 'Bytes', data: [], type: 'line', borderColor: '#eab308', yAxisID: 'y1', tension: 0.3, pointRadius: 0 }
+                // { label: 'Bot', data: [], backgroundColor: '#ef4444', stack: 'edits' },
+                // { label: 'Bytes', data: [], type: 'line', borderColor: '#eab308', yAxisID: 'y1', tension: 0.3, pointRadius: 0 }
             ]},
             options: { 
                 responsive: true, maintainAspectRatio: false,
+                onClick: (event, elements) => {
+                    if (elements.length > 0) {
+                        const clickedIndex = elements[0].index;
+                        
+                        // Map the chart index back to the global timeline index
+                        // (Since the chart only shows the last 60 chunks)
+                        const timelineIndex = Math.max(0, timeline.length - 60) + clickedIndex;
+                        
+                        // Stop live streaming and jump to this time
+                        isLive = false;
+                        if (playInterval) {
+                            clearInterval(playInterval);
+                            playInterval = null;
+                            document.getElementById('playBtn').innerText = "▶ PLAY";
+                        }
+                        
+                        // Update UI
+                        render(timelineIndex);
+                        document.getElementById('timeSlider').value = timelineIndex;
+                        document.getElementById('timeLabel').innerText = "SELECTED: " + new Date(timeline[timelineIndex].time).toLocaleTimeString();
+                    }
+                },
+                // --- ADD HOVER CURSOR ---
+                onHover: (event, elements) => {
+                    event.native.target.style.cursor = elements[0] ? 'pointer' : 'default';
+                },
                 scales: { 
                     y: { stacked: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
-                    y1: { position: 'right', grid: { display: false }, ticks: { color: '#eab308' } }
+                    // y1: { position: 'right', grid: { display: false }, ticks: { color: '#eab308' } }
                 },
                 plugins: { legend: { labels: { color: '#f8fafc', font: { weight: 'bold' } } } },
                 animation: false
@@ -147,12 +259,13 @@
             mainChart.data.labels = slice.map(c => new Date(c.time).toLocaleTimeString([], { hour12: false }));
             mainChart.data.datasets[0].data = slice.map(c => c.edits.major);
             mainChart.data.datasets[1].data = slice.map(c => c.edits.minor);
-            mainChart.data.datasets[2].data = slice.map(c => c.edits.bot);
-            mainChart.data.datasets[3].data = slice.map(c => c.delta);
+            // mainChart.data.datasets[2].data = slice.map(c => c.edits.bot);
+            // mainChart.data.datasets[3].data = slice.map(c => c.delta);
             mainChart.update();
 
             // 5. Update Word Cloud
-            renderCloud(data.words);
+            // renderCloud(data.words);
+            renderTable(data.words);
         }
 
         function renderCloud(words) {
@@ -169,11 +282,34 @@
             words.forEach((w, i) => {
                 let el = document.querySelector(`[data-word="${CSS.escape(w.word)}"]`);
                 if (!el) {
-                    el = document.createElement('div');
+                    // 1. Create the link element
+                    el = document.createElement('a');
                     el.className = 'word-node';
-                    el.dataset.word = w.word;
                     el.innerText = w.word.toUpperCase();
-                    el.style.opacity = 0;
+                    
+                    // 2. Set Link Destination (Search Wikipedia in new tab)
+                    // If word is ****, we don't link it
+                    if (w.word !== '****') {
+                        el.href = `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(w.word)}`;
+                        el.target = "_blank";
+                        el.rel = "noopener noreferrer";
+                    }
+
+                    // 3. Set Tooltip (Definition/Stats)
+                    el.title = `Word: "${w.word}"\nOccurrences: ${w.count}\nOpen in Wikipedia`;
+
+                    // 4. Styling & Positioning
+                    const weight = w.count / maxCount;
+                    const size = 1 + (weight * 3.5); 
+                    const row = Math.floor(i / 5);
+                    const col = i % 5;
+                    
+                    el.style.transform = `translate(${(col * 18) - 40}vw, ${(row * 15) - 30}vh)`;
+                    el.style.fontSize = `${size}rem`;
+                    el.style.opacity = 0.4 + (weight * 0.6);
+                    el.style.color = w.word === '****' ? '#ef4444' : `hsl(${210 + (weight * 60)}, 80%, 70%)`;
+                    el.style.textDecoration = 'none';
+
                     cloud.appendChild(el);
                 }
 
@@ -189,6 +325,62 @@
                 el.style.color = w.word === '****' ? '#ef4444' : `hsl(${210 + (weight * 60)}, 80%, 70%)`;
             });
         }
+
+function renderTable(words) {
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = ''; // Clear previous
+
+    // Filter out words in our ignore list
+    const filteredWords = words.filter(w => !ignoredWords.has(w.word.toLowerCase()));
+
+    const totalChunkEdits = filteredWords.reduce((sum, w) => sum + w.count, 0);
+    const maxCount = Math.max(...filteredWords.map(w => w.count)) || 1;
+
+    filteredWords.forEach((w, i) => {
+        const row = document.createElement('tr');
+        const percent = ((w.count / totalChunkEdits) * 100).toFixed(1);
+        const barWidth = (w.count / maxCount) * 100;
+
+        row.innerHTML = `
+            <td class="rank-cell">#${i + 1}</td>
+            <td class="word-cell">
+                ${w.word.toUpperCase()}
+                <div class="share-bar" style="width: ${barWidth}%"></div>
+            </td>
+            <td class="count-cell">${w.count}</td>
+            <td>${percent}%</td>
+            <td>
+                ${w.word !== '****' ? 
+                    `<a href="https://en.wikipedia.org/wiki/${encodeURIComponent(w.word)}" 
+                        target="_blank" class="wiki-link">Lookup ↗</a>
+                        <a href="javascript: toggleIgnore('${w.word.toLowerCase()}')" class="ignore-btn" title="Hide word">Ignore ⊘</a>` : 
+                    '<span style="color:#ef4444">CENSORED</span>'}
+            </td>
+        `;
+        
+        // Add tooltip for technical stats
+        row.title = `Total edits in this 10s window: ${totalChunkEdits}`;
+        tbody.appendChild(row);
+    });
+}
+
+// Load ignored words from storage, or start fresh
+let ignoredWords = new Set(JSON.parse(localStorage.getItem('wiki_ignored_words') || '[]'));
+
+function toggleIgnore(word) {
+    if (ignoredWords.has(word)) {
+        ignoredWords.delete(word);
+    } else {
+        ignoredWords.add(word);
+    }
+    // Save to browser storage
+    localStorage.setItem('wiki_ignored_words', JSON.stringify([...ignoredWords]));
+    
+    // Re-render the current view immediately
+    const currentIndex = document.getElementById('timeSlider').value;
+    render(currentIndex);
+}
+
 
         // --- INTERACTION ---
         document.getElementById('timeSlider').oninput = (e) => {
